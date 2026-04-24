@@ -78,7 +78,7 @@ def main():
     denoiser = DiscreteDenoiser(num_idx=1000, device=device)
     raw_model = seva_load_weights(
         model_version=1.1,
-        pretrained_model_name_or_path="stabilityai/stable-virtual-camera",
+        pretrained_model_name_or_path=str(Path(__file__).resolve().parent / "weights"),
         weight_name="model.safetensors",
         device="cpu",
         verbose=False,
