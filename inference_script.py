@@ -3,6 +3,7 @@
 import argparse
 import json
 import math
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -15,13 +16,23 @@ from seva.modules.autoencoder import AutoEncoder
 from seva.modules.conditioner import CLIPConditioner
 from seva.sampling import DiscreteDenoiser
 from seva.utils import load_model as seva_load_weights
-from seva.eval import create_samplers, do_sample, get_value_dict
+#Imported set_lowram_mode to locally offload models to CPU until needed, essential for 6 GB VRAM cards
+from seva.eval import create_samplers, do_sample, get_value_dict, set_lowvram_mode
 
-# Constants
-H, W = 576, 576
-T = 5
+# Force math SDP backend — Flash/MemEfficient/CuDNN are not available on Windows
+torch.backends.cuda.enable_flash_sdp(False)
+torch.backends.cuda.enable_mem_efficient_sdp(False)
+torch.backends.cuda.enable_math_sdp(True)
+
+import os
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
+
+# Constants — aggressive reduction to fit within 6 GB VRAM (RTX 2060)
+H, W = 384, 384
+T = 2
 C, F_FACTOR = 4, 8
-CFG, STEPS = 2.0, 50
+CFG, STEPS = 2.0, 20
 LOOK_AT = torch.tensor([0.0, 0.0, 10.0])
 UP = torch.tensor([0.0, -1.0, 0.0])
 
@@ -72,18 +83,30 @@ def main():
     img = torch.from_numpy(frame_rgb).permute(2, 0, 1).float().div_(255).mul_(2).sub_(1)
     img = F.interpolate(img.unsqueeze(0), (H, W), mode="area").squeeze(0)
 
-    # Load model
-    ae = AutoEncoder(chunk_size=1).to(device)
-    conditioner = CLIPConditioner().to(device)
+    # Free any leftover GPU memory before loading models
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    # ae = AutoEncoder(chunk_size=1).to(device)
+    # conditioner = CLIPConditioner().to(device)
+
+    # Enable CPU offloading — loads each sub-model to GPU only when needed,
+    # then moves it back to CPU. Essential for 6 GB VRAM cards.
+    set_lowvram_mode(True)
+
+    ae = AutoEncoder(chunk_size=1).to("cpu")
+    conditioner = CLIPConditioner().to("cpu")
     denoiser = DiscreteDenoiser(num_idx=1000, device=device)
     raw_model = seva_load_weights(
         model_version=1.1,
         pretrained_model_name_or_path=str(Path(__file__).resolve().parent / "weights"),
-        weight_name="model.safetensors",
+        weight_name="modelv1.1.safetensors",
         device="cpu",
         verbose=False,
     ).eval()
-    model = SGMWrapper(raw_model).to(device)
+    # Wrap in SGMWrapper but keep on CPU — sampler will call .to(device) per step
+    model = SGMWrapper(raw_model)  # stays on CPU
+    # model = SGMWrapper(raw_model).to(device)
 
     # Camera trajectory
     c2ws, fovs = build_trajectory(params["yaw"], params["pitch"], params["zoom"])
@@ -96,7 +119,7 @@ def main():
         curr_imgs=imgs.to(device),
         curr_input_frame_indices=[0],
         curr_c2ws=c2ws[:, :3].float(),
-        curr_Ks=Ks.float(),
+        curr_Ks=Ks.float(), 
         curr_input_camera_indices=[0],
         all_c2ws=c2ws.float(),
         camera_scale=2.0,

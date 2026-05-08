@@ -67,7 +67,7 @@ class Attention(nn.Module):
             lambda t: rearrange(t, "b l (h d) -> b h l d", h=self.heads),
             (q, k, v),
         )
-        with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+        with sdpa_kernel(SDPBackend.MATH):
             out = F.scaled_dot_product_attention(q, k, v)
         out = rearrange(out, "b h l d -> b l (h d)")
         out = self.to_out(out)
